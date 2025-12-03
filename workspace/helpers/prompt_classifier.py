@@ -30,23 +30,28 @@ Image Description (natural language):
 Image Analysis (structured slots JSON):
 {image_slots_json}
 
+Number of images provided: {num_images}
+
 User Request:
 "{user_request}"
 
 Classify the request into EXACTLY ONE of these categories (OUTPUT ONE WORD ONLY; no explanation):
 
-1. style_transfer - Applying artistic styles, converting to different art forms (sketch, anime, oil painting, watercolor, cartoon, vintage photo, cinematic look). Transforms aesthetic while preserving structure.
+1. style_transfer - Applying artistic styles using TEXT DESCRIPTION, converting to different art forms (sketch, anime, oil painting, watercolor, cartoon, vintage photo, cinematic look). Transforms aesthetic while preserving structure. Use this when user describes style in words.
 
-2. color_grading - Adjusting colors, tones, lighting, and atmosphere (brightness, contrast, saturation, warmth/coolness, color filters, exposure, shadows, highlights, vignette).
+2. style_transfer_ref - Copying/transferring style FROM A REFERENCE IMAGE to another image. Use this when user provides TWO IMAGES and wants to apply the style/look of one image onto another. Keywords: "copy style", "match style", "like this image", "transfer style from", "make it look like".
 
-3. manual - Simple geometric or basic transformations that don't require AI models (crop, rotate, flip, resize, scale, blur, sharpen, simple filter).
+3. color_grading - Adjusting colors, tones, lighting, and atmosphere (brightness, contrast, saturation, warmth/coolness, color filters, exposure, shadows, highlights, vignette).
 
-4. default_mode - Complex content-editing requiring content understanding or generative editing: object removal/addition/replacement, background changes/removal, inpainting/outpainting, face/person modifications, multi-step or ambiguous tasks.
+4. manual - Simple geometric or basic transformations that don't require AI models (crop, rotate, flip, resize, scale, blur, sharpen, simple filter).
+
+5. default_mode - Complex content-editing requiring content understanding or generative editing: object removal/addition/replacement, background changes/removal, inpainting/outpainting, face/person modifications, multi-step or ambiguous tasks.
 
 Rules:
 - Use BOTH the image description and image analysis slots together with the user request.
 - Choose the MOST SPECIFIC category that applies.
-- If the request changes artistic style or overall aesthetic -> style_transfer.
+- If TWO IMAGES are provided AND user wants to copy/transfer style between them -> style_transfer_ref.
+- If the request changes artistic style using text description -> style_transfer.
 - If the request adjusts color, lighting, or tone -> color_grading.
 - If the request is basic geometric or single-step filter-like -> manual.
 - Use default_mode only if the task clearly requires content-aware or generative editing.
@@ -54,10 +59,17 @@ Rules:
 Response (one word only):
 """
 
-ALLOWED_CATEGORIES = {"style_transfer", "color_grading", "manual", "default_mode"}
+ALLOWED_CATEGORIES = {
+    "style_transfer",
+    "style_transfer_ref",
+    "color_grading",
+    "manual",
+    "default_mode",
+}
 
 CATEGORY_DESCRIPTIONS = {
-    "style_transfer": "Artistic style transformation (sketch, anime, oil painting, etc.)",
+    "style_transfer": "Artistic style transformation using text description (sketch, anime, oil painting, etc.)",
+    "style_transfer_ref": "Style transfer using a reference image - copies style from one image to another",
     "color_grading": "Color/tone/lighting adjustments (brightness, contrast, filters, etc.)",
     "manual": "Simple geometric operations (crop, rotate, flip, resize, blur)",
     "default_mode": "Complex content-aware editing (object removal/addition, background changes, inpainting, etc.)",
@@ -78,23 +90,175 @@ def _format_image_slots(slots: Optional[Dict[str, Any]]) -> str:
         return str(slots)
 
 
+def _determine_image_roles(
+    user_prompt: str,
+    image_analyses: Optional[list] = None,
+) -> Dict[str, Any]:
+    """
+    Determine which image is the style/reference and which is the content image.
+
+    Uses heuristics based on:
+    - User prompt keywords (e.g., "first image", "second image", "style of", "apply to")
+    - Image analysis metadata (if available)
+
+    Args:
+        user_prompt: The user's editing request
+        image_analyses: List of image analysis dicts (one per image)
+
+    Returns:
+        Dict with 'style_index', 'content_index', and 'confidence' keys
+    """
+    prompt_lower = user_prompt.lower()
+
+    # Default: first image is style, second is content
+    # (common pattern: "apply style of first image to second")
+    style_index = 0
+    content_index = 1
+    confidence = "low"
+
+    # Check for explicit ordering in prompt
+    # Patterns where first image is style reference
+    first_is_style_patterns = [
+        "style of first",
+        "first image style",
+        "style from first",
+        "like the first",
+        "first image's style",
+        "copy first",
+        "transfer from first",
+        "first one's style",
+        "style of image 1",
+        "image 1 style",
+        "style from image 1",
+    ]
+
+    # Patterns where second image is style reference
+    second_is_style_patterns = [
+        "style of second",
+        "second image style",
+        "style from second",
+        "like the second",
+        "second image's style",
+        "copy second",
+        "transfer from second",
+        "second one's style",
+        "style of image 2",
+        "image 2 style",
+        "style from image 2",
+    ]
+
+    # Patterns where first is content (to be styled)
+    first_is_content_patterns = [
+        "apply to first",
+        "first image to",
+        "style the first",
+        "edit first",
+        "transform first",
+        "first one to",
+        "apply to image 1",
+        "image 1 to",
+    ]
+
+    # Patterns where second is content (to be styled)
+    second_is_content_patterns = [
+        "apply to second",
+        "second image to",
+        "style the second",
+        "edit second",
+        "transform second",
+        "second one to",
+        "apply to image 2",
+        "image 2 to",
+    ]
+
+    for pattern in first_is_style_patterns:
+        if pattern in prompt_lower:
+            style_index = 0
+            content_index = 1
+            confidence = "high"
+            break
+
+    for pattern in second_is_style_patterns:
+        if pattern in prompt_lower:
+            style_index = 1
+            content_index = 0
+            confidence = "high"
+            break
+
+    for pattern in first_is_content_patterns:
+        if pattern in prompt_lower:
+            content_index = 0
+            style_index = 1
+            confidence = "high"
+            break
+
+    for pattern in second_is_content_patterns:
+        if pattern in prompt_lower:
+            content_index = 1
+            style_index = 0
+            confidence = "high"
+            break
+
+    # If we have image analyses, use metadata hints
+    if image_analyses and len(image_analyses) >= 2 and confidence == "low":
+        for i, analysis in enumerate(image_analyses):
+            if analysis:
+                role = analysis.get("role", "").lower()
+                img_type = analysis.get("type", "").lower()
+
+                if role in ["style", "reference"] or img_type in ["style", "reference"]:
+                    style_index = i
+                    content_index = (
+                        1 - i
+                        if len(image_analyses) == 2
+                        else (i + 1) % len(image_analyses)
+                    )
+                    confidence = "medium"
+                    break
+                elif role in ["content", "target", "main"] or img_type in [
+                    "content",
+                    "target",
+                    "main",
+                ]:
+                    content_index = i
+                    style_index = (
+                        1 - i
+                        if len(image_analyses) == 2
+                        else (i + 1) % len(image_analyses)
+                    )
+                    confidence = "medium"
+                    break
+
+    return {
+        "style_index": style_index,
+        "content_index": content_index,
+        "confidence": confidence,
+    }
+
+
 def classify_prompt(
     user_prompt: str,
     image_description: str = "",
     image_analysis: Optional[Dict[str, Any]] = None,
+    image_analyses: Optional[list] = None,
+    num_images: int = 1,
     max_length: int = 512,
-) -> str:
+) -> Dict[str, Any]:
     """
     Classify a user prompt into one of the allowed categories.
 
     Args:
         user_prompt: Text prompt to classify
-        image_description: Optional natural-language description of the image
+        image_description: Optional natural-language description of the image(s)
         image_analysis: Optional dict containing structured slots (subject, style, constraints, ...)
+        image_analyses: Optional list of image analysis dicts (one per image, for multi-image scenarios)
+        num_images: Number of images provided (default 1)
         max_length: tokenization truncation max length (passed to tokenizer)
 
     Returns:
-        str: One of: style_transfer, color_grading, manual, default_mode
+        Dict containing:
+            - classification: str (one of: style_transfer, style_transfer_ref, color_grading, manual, default_mode)
+            - image_roles: Dict with style_index, content_index (only for style_transfer_ref)
     """
     cache = get_model_cache()
     model, tokenizer = cache.get_flan_t5()
@@ -109,6 +273,7 @@ def classify_prompt(
     prompt = CLASSIFICATION_PROMPT.format(
         image_description=img_desc,
         image_slots_json=img_slots_json,
+        num_images=num_images,
         user_request=user_prompt.strip(),
     )
 
@@ -130,61 +295,91 @@ def classify_prompt(
     resp = tokenizer.decode(outputs[0], skip_special_tokens=True)
     resp = resp.strip().lower()
 
+    classification = None
+
     # Extract the last token/word that matches allowed categories
     # split by whitespace and punctuation
     tokens = [t.strip(" .,\n\"'") for t in resp.split()]
     for t in tokens[::-1]:
         if t in ALLOWED_CATEGORIES:
-            return t
+            classification = t
+            break
 
     # substring match fallback
-    for category in ALLOWED_CATEGORIES:
-        if category in resp:
-            return category
+    if not classification:
+        for category in ALLOWED_CATEGORIES:
+            if category in resp:
+                classification = category
+                break
 
     # As final safety fallback, attempt simple heuristics on user_prompt & image_analysis
-    combined = (
-        user_prompt
-        + " "
-        + (image_description or "")
-        + " "
-        + json.dumps(image_analysis or {})
-    ).lower()
-    if any(
-        w in combined
-        for w in [
-            "paint",
-            "watercolor",
-            "oil painting",
-            "anime",
-            "cartoon",
-            "photorealistic",
-            "style",
-        ]
-    ):
-        return "style_transfer"
-    if any(
-        w in combined
-        for w in [
-            "color",
-            "brightness",
-            "contrast",
-            "saturation",
-            "exposure",
-            "tone",
-            "white balance",
-            "warm",
-            "cool",
-        ]
-    ):
-        return "color_grading"
-    if any(
-        w in combined
-        for w in ["crop", "rotate", "flip", "resize", "blur", "sharpen", "scale"]
-    ):
-        return "manual"
+    if not classification:
+        combined = (
+            user_prompt
+            + " "
+            + (image_description or "")
+            + " "
+            + json.dumps(image_analysis or {})
+        ).lower()
 
-    return "default_mode"
+        # Check for style_transfer_ref first (needs multiple images + style transfer intent)
+        style_ref_keywords = [
+            "copy style",
+            "match style",
+            "like this image",
+            "transfer style",
+            "style from",
+            "same style as",
+            "style of the",
+            "apply the style",
+            "reference image",
+            "style reference",
+        ]
+        if num_images >= 2 and any(w in combined for w in style_ref_keywords):
+            classification = "style_transfer_ref"
+        elif any(
+            w in combined
+            for w in [
+                "paint",
+                "watercolor",
+                "oil painting",
+                "anime",
+                "cartoon",
+                "photorealistic",
+            ]
+        ):
+            classification = "style_transfer"
+        elif any(
+            w in combined
+            for w in [
+                "color",
+                "brightness",
+                "contrast",
+                "saturation",
+                "exposure",
+                "tone",
+                "white balance",
+                "warm",
+                "cool",
+            ]
+        ):
+            classification = "color_grading"
+        elif any(
+            w in combined
+            for w in ["crop", "rotate", "flip", "resize", "blur", "sharpen", "scale"]
+        ):
+            classification = "manual"
+        else:
+            classification = "default_mode"
+
+    # Build result dict
+    result = {"classification": classification}
+
+    # For style_transfer_ref, determine image roles
+    if classification == "style_transfer_ref" and num_images >= 2:
+        result["image_roles"] = _determine_image_roles(user_prompt, image_analyses)
+
+    return result
 
 
 def run_prompt_classifier(
@@ -192,6 +387,8 @@ def run_prompt_classifier(
     output_dir: str,
     image_description: str = "",
     image_analysis: Optional[Dict[str, Any]] = None,
+    image_analyses: Optional[list] = None,
+    num_images: int = 1,
 ) -> Dict[str, Any]:
     """
     Run prompt classification using cached FLAN-T5 model.
@@ -201,28 +398,42 @@ def run_prompt_classifier(
         output_dir: Directory to save output JSON
         image_description: Optional natural-language image description
         image_analysis: Optional structured slots dictionary (from image analysis)
+        image_analyses: Optional list of image analysis dicts (one per image)
+        num_images: Number of images provided (default 1)
 
     Returns:
-        dict: Contains classification result and metadata (same structure as original, with image_analysis added)
+        dict: Contains classification result, image_roles (for style_transfer_ref), and metadata
     """
     timestamp = int(time.time())
 
     print(f"[INFO]: Classifying prompt: '{prompt}'")
+    print(f"[INFO]: Number of images: {num_images}")
     if image_description:
         print(f"[INFO]: Image description: '{image_description[:200]}...'")
     if image_analysis:
         print(f"[INFO]: Image analysis slots provided: {list(image_analysis.keys())}")
+    if image_analyses:
+        print(f"[INFO]: Image analyses provided for {len(image_analyses)} images")
 
-    classification = classify_prompt(
-        prompt, image_description=image_description, image_analysis=image_analysis
+    classification_result = classify_prompt(
+        prompt,
+        image_description=image_description,
+        image_analysis=image_analysis,
+        image_analyses=image_analyses,
+        num_images=num_images,
     )
+
+    classification = classification_result["classification"]
+    image_roles = classification_result.get("image_roles")
 
     result = {
         "task": "prompt_classifier",
         "input_prompt": prompt,
+        "num_images": num_images,
         "image_description": image_description if image_description else None,
         "image_analysis": image_analysis if image_analysis else None,
         "classification": classification,
+        "image_roles": image_roles,
         "category_description": CATEGORY_DESCRIPTIONS.get(classification, ""),
         "all_categories": CATEGORY_DESCRIPTIONS,
         "timestamp": timestamp,
@@ -240,6 +451,10 @@ def run_prompt_classifier(
 
     print(f"\n[SUCCESS]: Results saved to: {output_path}")
     print(f"[INFO]: Classification: {classification}")
+    if image_roles:
+        print(
+            f"[INFO]: Image roles: style_index={image_roles['style_index']}, content_index={image_roles['content_index']}"
+        )
 
     return result
 
