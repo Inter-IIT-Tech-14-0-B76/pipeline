@@ -1,0 +1,26 @@
+{
+  "task": "color_grading",
+  "input_image": "/workspace/AIP/workspace/outputs/images/main.png",
+  "prompt": "cinematic teal shadows and warm highlights",
+  "mode": "both",
+  "outputs": {
+    "ai_graded": "./outputs/images/color_grading_ai_1764774680.png",
+    "manual_graded": "./outputs/images/color_grading_manual_1764774680.png"
+  },
+  "extracted_parameters": {
+    "exposure": 0.0,
+    "contrast": 17.39,
+    "saturation": -4.54,
+    "temperature": -9.61,
+    "tint": 5.95,
+    "gamma": 0.4
+  },
+  "detected_objects": [
+    "car",
+    "sky-other-merged",
+    "road",
+    "tree-merged",
+    "house",
+    "pavement-merged"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "task": "prompt_classifier",
+  "input_prompt": "turn this photo into a soft watercolor painting",
+  "classification": "edit",
+  "category_description": "modify image content (add/remove/replace objects)",
+  "all_categories": {
+    "style": "style transfer, artistic themes",
+    "color": "color grading, filter-like changes",
+    "edit": "modify image content (add/remove/replace objects)",
+    "manual": "simple operations (crop, rotate, resize)",
+    "remix": "combining two images together"
+  }
+}

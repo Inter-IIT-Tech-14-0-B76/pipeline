@@ -1,0 +1,11 @@
+{
+  "task": "style_transfer_with_image",
+  "content_image": "/workspace/AIP/workspace/outputs/images/main.png",
+  "style_image": "/workspace/AIP/workspace/outputs/images/reference.png",
+  "prompt": "match lighting and texture from the reference",
+  "negative_prompt": "cluttered, complex background, dark background",
+  "steps": 50,
+  "output_composite": "./outputs/images/style_transfer_ref_1764773609.png",
+  "output_styled_only": "./outputs/images/style_transfer_ref_styled_1764773609.png",
+  "device": "cuda"
+}

@@ -1,0 +1,21 @@
+torch>=2.0.0,<3.0.0
+torchvision>=0.15.0,<1.0.0
+numpy>=1.23.0
+Pillow>=9.0.0
+opencv-python>=4.6.0
+matplotlib>=3.5.0
+transformers>=4.30.0
+hydra-core>=1.2.0
+omegaconf>=2.3.0
+huggingface-hub>=0.12.0
+tqdm>=4.64.0
+pycocotools>=2.0.6
+decord>=0.6.0
+iopath>=0.1.10
+typing-extensions>=4.0.0
+
+# Notes:
+# - Some packages (e.g., `decord`, `pycocotools`) are imported conditionally in the
+#   codebase and may be optional depending on which features you use.
+# - CUDA-enabled builds require matching `torch`/`torchvision` binaries for your
+#   CUDA version; consult https://pytorch.org for the correct wheel.

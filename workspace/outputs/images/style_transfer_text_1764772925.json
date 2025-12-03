@@ -1,0 +1,13 @@
+{
+  "task": "style_transfer_with_text",
+  "content_image": "/workspace/AIP/workspace/outputs/images/main.png",
+  "style_text": "soft pastel art style with gentle tones",
+  "prompt": "apply a smooth dreamy pastel look",
+  "negative_prompt": "",
+  "steps": 40,
+  "style_steps": 20,
+  "generated_style_reference": "./outputs/images/style_transfer_text_generated_style_1764772925.png",
+  "output_composite": "./outputs/images/style_transfer_text_1764772925.png",
+  "output_styled_only": "./outputs/images/style_transfer_text_styled_1764772925.png",
+  "device": "cuda"
+}

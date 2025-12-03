@@ -1,0 +1,7 @@
+{
+  "task": "ai_suggestions",
+  "input_image": "/workspace/AIP/workspace/outputs/images/final_metric.png",
+  "image_summary": "",
+  "edit_prompts": [],
+  "raw_output": "1. IMAGE-SPECIFIC ANALYSIS:\n   - The image shows a row of colorful, multi-storied buildings along the waterfront.\n   - The buildings feature a range of vibrant colors, including red, orange, yellow, blue, and green.\n   - The scene appears to be on a rainy day, with rain falling and creating reflections on the water's surface.\n\n2. EDIT_PROMPTS:\n   - Add a dynamic water reflection to the water.\n   - Replace the overcast sky with a brighter, more vibrant blue.\n   - Change the perspective of the buildings to emphasize their height and prominence.\n   - Enhance the visual contrast between the colorful buildings and the gray, rainy sky by introducing darker tones and textures.\n   - Replace the outdoor seating area with a more enclosed structure or fence.\n   - Add a subtle splash of color to the water's surface, perhaps from a nearby boat or reflections.\n   - Change the placement of the boats or waterfront structures to better integrate them into the composition."
+}

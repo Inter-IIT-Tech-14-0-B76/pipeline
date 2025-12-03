@@ -1,0 +1,13 @@
+{
+  "task": "prompt_classifier",
+  "input_prompt": "convert to monochrome film look",
+  "image_description": null,
+  "classification": "style_transfer",
+  "category_description": "Artistic style transformation (sketch, anime, oil painting, etc.)",
+  "all_categories": {
+    "style_transfer": "Artistic style transformation (sketch, anime, oil painting, etc.)",
+    "color_grading": "Color/tone/lighting adjustments (brightness, contrast, filters, etc.)",
+    "manual": "Simple geometric operations (crop, rotate, flip, resize, blur)",
+    "default_mode": "Complex content-aware editing (object removal/addition, background changes, inpainting, etc.)"
+  }
+}

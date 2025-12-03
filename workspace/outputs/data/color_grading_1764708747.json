@@ -1,0 +1,29 @@
+{
+  "task": "color_grading",
+  "input_image": "/workspace/AIP/workspace/outputs/images/final_metric.png",
+  "prompt": "cinematic teal shadows and warm highlights",
+  "mode": "both",
+  "outputs": {
+    "ai_graded": "./outputs/images/color_grading_ai_1764708747.png",
+    "manual_graded": "./outputs/images/color_grading_manual_1764708747.png"
+  },
+  "extracted_parameters": {
+    "exposure": 0.0,
+    "contrast": 8.15,
+    "saturation": -13.78,
+    "temperature": -12.04,
+    "tint": -9.51,
+    "gamma": 14.54
+  },
+  "detected_objects": [
+    "sky-other-merged",
+    "boat",
+    "river",
+    "tree-merged",
+    "chair",
+    "umbrella",
+    "person",
+    "house",
+    "wall-other-merged"
+  ]
+}

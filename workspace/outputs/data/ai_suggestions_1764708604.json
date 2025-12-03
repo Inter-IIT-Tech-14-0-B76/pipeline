@@ -1,0 +1,10 @@
+{
+  "task": "ai_suggestions",
+  "input_image": "/workspace/AIP/workspace/outputs/images/final_metric.png",
+  "image_summary": "",
+  "edit_prompts": [
+    "IMAGE-SPECIFIC ANALYSIS:",
+    "EDITING SUGGESTIONS AS PROMPTS:"
+  ],
+  "raw_output": "1. IMAGE-SPECIFIC ANALYSIS:\n   - The image shows a row of colorful, multi-storied buildings along the waterfront.\n   - The buildings feature a range of vibrant colors, including red, orange, yellow, blue, and green.\n   - The scene appears to be during rainy weather, as indicated by the rain falling and the wet surface.\n\n2. EDITING SUGGESTIONS AS PROMPTS:\n   - Add a dynamic rain effect to the image.\n   - Replace the outdoor seating area with a more enclosed structure or covered area.\n   - Change the angle of the rain to emphasize its impact.\n   - Enhance the contrast between the colorful buildings and the gray sky.\n   - Add a subtle reflection of the buildings on the water's surface.\n   - Replace the boat with a more visually prominent element, such as a large sculpture or a unique water feature.\n   - Change the composition to focus attention on the buildings and the waterfront.\n   - Enhance the overall mood and atmosphere of the image by adding more vibrant colors and details."
+}
