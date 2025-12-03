@@ -1,5 +1,6 @@
 """
-AI Image Processing Server - Flask API with unified model cache
+AI Image Processing Server - Flask API with unified model cache (enhanced prompt classifier)
+
 All models are loaded once at startup and kept in memory for fast inference.
 
 Usage:
@@ -10,25 +11,30 @@ Endpoints:
     POST /style-transfer/ref   - Style transfer with reference image
     POST /color-grading        - AI color grading
     POST /ai-suggestions       - Get editing suggestions for an image
-    POST /classify             - Classify a prompt into task category
+    POST /classify             - Classify a prompt into task category (supports image_analysis slots)
     GET  /health               - Check if server is ready
     GET  /status               - Get detailed server status
 """
 
 import os
 import argparse
+import json
+import traceback
+
 import torch
 from flask import Flask, request, jsonify
 
 # Import unified cache
 from helpers.model_cache import get_model_cache
 
-# Import task functions
+# Import task functions (unchanged)
 from helpers.style_transfer_text import run_style_transfer
 from helpers.style_transfer_ref import run_style_transfer_ref
 from helpers.color_grading import run_color_grading
 from helpers.ai_suggestions import run_ai_suggestions
+
 from helpers.prompt_classifier import run_prompt_classifier, classify_prompt
+
 # Segmentation (SAM2)
 from segmentation_sam2.init import segment_image
 
@@ -37,6 +43,42 @@ app = Flask(__name__)
 # Default output directories
 DEFAULT_OUTPUT_IMAGES = "./outputs/images"
 DEFAULT_OUTPUT_DATA = "./outputs/data"
+
+
+# =============================================================================
+# UTIL
+# =============================================================================
+def _parse_image_analysis_field(raw):
+    """
+    Accepts:
+      - None
+      - dict (already parsed)
+      - JSON string
+      - file path to a JSON file
+
+    Returns parsed dict or None.
+    """
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    # If it's a string, try parse JSON, else try read file
+    if isinstance(raw, str):
+        raw = raw.strip()
+        # try JSON parse
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        # try file path
+        if os.path.exists(raw):
+            try:
+                with open(raw, "r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                return None
+    # unknown format
+    return None
 
 
 # =============================================================================
@@ -60,14 +102,17 @@ def status():
     cache = get_model_cache()
     status_data = cache.get_status()
 
-    if cache.device == "cuda":
-        status_data["gpu"] = {
-            "name": torch.cuda.get_device_name(0),
-            "vram_total_gb": round(
-                torch.cuda.get_device_properties(0).total_memory / 1e9, 1
-            ),
-            "vram_used_gb": round(torch.cuda.memory_allocated(0) / 1e9, 1),
-        }
+    if getattr(cache, "device", None) == "cuda":
+        try:
+            status_data["gpu"] = {
+                "name": torch.cuda.get_device_name(0),
+                "vram_total_gb": round(
+                    torch.cuda.get_device_properties(0).total_memory / 1e9, 1
+                ),
+                "vram_used_gb": round(torch.cuda.memory_allocated(0) / 1e9, 1),
+            }
+        except Exception:
+            status_data["gpu"] = {"error": "failed to query GPU details"}
 
     status_data["status"] = "ready" if cache.all_loaded() else "partial"
     return jsonify(status_data)
@@ -81,7 +126,6 @@ def style_transfer_text():
     """Style transfer using text description to generate style."""
     try:
         params = request.get_json()
-
         if not params:
             return jsonify({"error": "Empty request body"}), 400
 
@@ -108,8 +152,6 @@ def style_transfer_text():
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -122,7 +164,6 @@ def style_transfer_ref():
     """Style transfer using a reference style image."""
     try:
         params = request.get_json()
-
         if not params:
             return jsonify({"error": "Empty request body"}), 400
 
@@ -152,8 +193,6 @@ def style_transfer_ref():
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -166,7 +205,6 @@ def color_grading():
     """AI-powered color grading with parameter extraction."""
     try:
         params = request.get_json()
-
         if not params:
             return jsonify({"error": "Empty request body"}), 400
 
@@ -188,8 +226,6 @@ def color_grading():
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -202,7 +238,6 @@ def ai_suggestions():
     """Get AI-generated editing suggestions for an image."""
     try:
         params = request.get_json()
-
         if not params:
             return jsonify({"error": "Empty request body"}), 400
 
@@ -221,46 +256,66 @@ def ai_suggestions():
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 # =============================================================================
-# PROMPT CLASSIFIER ENDPOINT
+# PROMPT CLASSIFIER ENDPOINT (ENHANCED)
 # =============================================================================
 @app.route("/classify", methods=["POST"])
 def classify():
-    """Classify a user prompt into task categories."""
+    """Classify a user prompt into task categories.
+
+    Accepts JSON body with keys:
+      - prompt (str)                 REQUIRED
+      - quick (bool)                 optional: if true, run quick classify (no file writing)
+      - image_description (str)      optional: free-text description of image
+      - image_analysis (dict|string) optional: structured slots JSON or path/JSON string
+      - output_dir (str)             optional: where to save full result (used when quick=False)
+    """
     try:
         params = request.get_json()
-
         if not params:
             return jsonify({"error": "Empty request body"}), 400
 
         if "prompt" not in params:
             return jsonify({"error": "Missing: prompt"}), 400
 
+        prompt_text = params["prompt"]
+        image_description = params.get("image_description", "")
+        image_analysis_raw = params.get("image_analysis", None)
+        image_analysis = _parse_image_analysis_field(image_analysis_raw)
+
         # Quick classification (no file saving)
         if params.get("quick", False):
-            classification = classify_prompt(params["prompt"])
+            # classify_prompt from enhanced module supports image_description & image_analysis
+            classification = classify_prompt(
+                user_prompt=prompt_text,
+                image_description=image_description,
+                image_analysis=image_analysis,
+            )
             return jsonify(
-                {"prompt": params["prompt"], "classification": classification}
+                {
+                    "prompt": prompt_text,
+                    "classification": classification,
+                    "image_description": image_description or None,
+                    "image_analysis_provided": bool(image_analysis),
+                }
             )
 
-        # Full classification with file output
+        # Full classification with file output (run_prompt_classifier now accepts image_analysis)
         result = run_prompt_classifier(
-            prompt=params["prompt"],
+            prompt=prompt_text,
             output_dir=params.get("output_dir", DEFAULT_OUTPUT_DATA),
+            image_description=image_description,
+            image_analysis=image_analysis,
         )
 
         return jsonify(result)
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -287,6 +342,7 @@ def sam_segment():
         x = int(params["x"])
         y = int(params["y"])
         output_dir = params.get("output_dir", "outputs/segmentation")
+        os.makedirs(output_dir, exist_ok=True)
 
         if not os.path.exists(image_path):
             return jsonify({"error": "Image file not found"}), 404
@@ -300,8 +356,6 @@ def sam_segment():
 
     except Exception as e:
         print(f"[ERROR]: {e}")
-        import traceback
-
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -310,7 +364,9 @@ def sam_segment():
 # MAIN
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="AI Image Processing Server")
+    parser = argparse.ArgumentParser(
+        description="AI Image Processing Server (enhanced classifier)"
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     parser.add_argument("--debug", action="store_true", help="Debug mode")
@@ -343,17 +399,18 @@ def main():
     if args.preload_sam_only:
         print("[INFO]: Preloading SAM2 only (will exit after attempt)")
         try:
-            get_model_cache().preload_sam(config_path=args.sam_config, checkpoint_path=args.sam_checkpoint)
+            get_model_cache().preload_sam(
+                config_path=args.sam_config, checkpoint_path=args.sam_checkpoint
+            )
             print("[SUCCESS]: SAM2 preload succeeded")
             return
         except Exception as e:
             print(f"[ERROR]: SAM2 preload failed: {e}")
-            import traceback
-
             traceback.print_exc()
             return
 
     if not args.skip_preload:
+        print("[INFO]: Preloading all models (this may take a while)...")
         get_model_cache().preload_all()
 
     print("\n" + "=" * 60)
@@ -364,7 +421,9 @@ def main():
     print("  POST /style-transfer/ref   - Style transfer (reference)")
     print("  POST /color-grading        - AI color grading")
     print("  POST /ai-suggestions       - Get editing suggestions")
-    print("  POST /classify             - Classify prompt")
+    print(
+        "  POST /classify             - Classify prompt (supports image_analysis slots)"
+    )
     print("  GET  /health               - Health check")
     print("  GET  /status               - Detailed status")
     print("\n[INFO]: Models preloaded - inference will be fast!")

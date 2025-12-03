@@ -10,6 +10,9 @@ STYLE = "/workspace/AIP/workspace/outputs/images/reference.png"
 
 timings = {}
 
+# Will be filled dynamically from AI suggestions
+IMAGE_ANALYSIS = None
+
 
 def timed(name, func, *args, **kwargs):
     start = time.time()
@@ -21,7 +24,8 @@ def timed(name, func, *args, **kwargs):
 def pretty(resp):
     try:
         print(json.dumps(resp.json(), indent=2))
-    except:
+    except Exception as e:
+        print("[ERROR] Could not parse JSON response:", e)
         print(resp.status_code, resp.text)
 
 
@@ -83,25 +87,52 @@ def color_grading():
 
 
 def ai_suggestions():
+    """
+    Capture AI suggestions AND store the 'analysis' output globally
+    so classify_quick() and classify_full() can reuse it.
+    """
+    global IMAGE_ANALYSIS
+
     print("\n--- /ai-suggestions ---")
     r = requests.post(f"{BASE}/ai-suggestions", json={"image": CONTENT})
+
     pretty(r)
+
+    try:
+        data = r.json()
+
+        # We assume your server returns something like:
+        # { "analysis": { ...slots... }, ... }
+        IMAGE_ANALYSIS = data
+
+    except Exception as e:
+        print("[ERROR] Could not parse AI suggestions JSON. e", str(e))
+
+    return r
 
 
 def classify_quick():
     print("\n--- /classify (quick) ---")
-    r = requests.post(
-        f"{BASE}/classify",
-        json={"prompt": "increase sharpness and reduce noise", "quick": True},
-    )
+    body = {
+        "prompt": "increase sharpness and reduce noise",
+        "quick": True,
+        "image_description": "auto-generated from ai-suggestions",
+        "image_analysis": IMAGE_ANALYSIS,
+    }
+
+    r = requests.post(f"{BASE}/classify", json=body)
     pretty(r)
 
 
 def classify_full():
     print("\n--- /classify (full) ---")
-    r = requests.post(
-        f"{BASE}/classify", json={"prompt": "convert to monochrome film look"}
-    )
+    body = {
+        "prompt": "convert to monochrome film look",
+        "image_description": "auto-generated from ai-suggestions",
+        "image_analysis": IMAGE_ANALYSIS,
+    }
+
+    r = requests.post(f"{BASE}/classify", json=body)
     pretty(r)
 
 
@@ -130,12 +161,18 @@ if __name__ == "__main__":
     timed("style_transfer_text", style_transfer_text)
     timed("style_transfer_ref", style_transfer_ref)
     timed("color_grading", color_grading)
+
+    # This will fill IMAGE_ANALYSIS
     timed("ai_suggestions", ai_suggestions)
+
+    # Now classifier will use real AI analysis
     timed("classify_quick", classify_quick)
     timed("classify_full", classify_full)
+
     timed("sam_segment", sam_segment)
 
     print("\n==================== TIMING SUMMARY ====================")
     for k, v in timings.items():
         print(f"{k:25s}: {v:6.3f} sec")
     print("========================================================")
+
