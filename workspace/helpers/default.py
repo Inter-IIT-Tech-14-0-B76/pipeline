@@ -10,7 +10,7 @@ import random
 
 OUTPUT_FOLDER = "/workspace/comfy_img_remix/comfycode/outputs"
 
-COMFY_URL = "http://0.0.0.0:8001"
+COMFY_URL = "http://0.0.0.0:8002"
 
 # Polling configuration
 MAX_POLL_TIME_SECONDS = 300  # 5 minutes max wait
