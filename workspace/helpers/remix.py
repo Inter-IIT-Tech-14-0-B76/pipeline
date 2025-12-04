@@ -4,14 +4,16 @@ import urllib.parse
 import urllib.error
 import requests  # pip install requests
 import time
-import argparse
-import sys
 import os
 import random
 
 
 OUTPUT_FOLDER = "/workspace/comfy_img_remix/comfycode/outputs"
 COMFY_URL = "http://0.0.0.0:8001"
+
+# Polling configuration
+MAX_POLL_TIME_SECONDS = 300  # 5 minutes max wait
+POLL_INTERVAL_SECONDS = 1
 WORKFLOW = {
     "1": {
         "inputs": {"strength": 1, "model": ["3", 0]},
@@ -237,50 +239,71 @@ WORKFLOW = {
 
 
 def upload_image(image_path, type_desc):
-    """Uploads an image to ComfyUI and returns the server filename."""
+    """Uploads an image to ComfyUI and returns the server filename or None on error."""
     if not os.path.exists(image_path):
-        sys.exit(f"[ERROR]: {type_desc} file not found: {image_path}")
+        print(f"[ERROR]: {type_desc} file not found: {image_path}")
+        return None
 
     url = f"{COMFY_URL}/upload/image"
     print(f"[INFO] Uploading {type_desc}: {os.path.basename(image_path)}...", end="")
 
-    with open(image_path, "rb") as f:
-        files = {"image": f}
-        data = {"overwrite": "true"}
-        try:
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": f}
+            data = {"overwrite": "true"}
             response = requests.post(url, files=files, data=data)
-        except requests.exceptions.ConnectionError:
-            sys.exit(
-                f"\n[ERROR]: Cannot connect to ComfyUI at {COMFY_URL}. Is it running?"
-            )
+    except requests.exceptions.ConnectionError:
+        print(f"\n[ERROR]: Cannot connect to ComfyUI at {COMFY_URL}. Is it running?")
+        return None
+    except Exception as e:
+        print(f"\n[ERROR]: Upload exception: {str(e)}")
+        return None
 
     if response.status_code == 200:
-        server_filename = response.json().get("name")
-        print(f" Done! ({server_filename})")
-        return server_filename
+        try:
+            server_filename = response.json().get("name")
+            print(f" Done! ({server_filename})")
+            return server_filename
+        except Exception:
+            print("\n[ERROR]: Failed to parse server response")
+            return None
     else:
-        sys.exit(f"\nUpload failed: {response.status_code} - {response.text}")
+        print(f"\n[ERROR]: Upload failed: {response.status_code} - {response.text}")
+        return None
 
 
 def queue_prompt(workflow_data):
+    """Queues a prompt; returns parsed JSON response or None on error."""
     p = {"prompt": workflow_data}
     data = json.dumps(p).encode("utf-8")
     try:
         req = urllib.request.Request(f"{COMFY_URL}/prompt", data=data)
         return json.loads(urllib.request.urlopen(req).read())
     except urllib.error.HTTPError as e:
-        print(f"\n[!] SERVER ERROR {e.code} [!]")
-        print(f"Message: {e.read().decode('utf-8')}")
-        sys.exit(1)
+        try:
+            msg = e.read().decode("utf-8")
+        except Exception:
+            msg = "<no body>"
+        print(f"\n[ERROR]: Server returned HTTP {e.code}")
+        print(f"[ERROR]: {msg}")
+        return None
+    except Exception as e:
+        print(f"\n[ERROR]: Failed to queue prompt: {str(e)}")
+        return None
 
 
 def get_history(prompt_id):
-    with urllib.request.urlopen(f"{COMFY_URL}/history/{prompt_id}") as response:
-        return json.loads(response.read())
+    """Return JSON history for a prompt id. Raises on error."""
+    try:
+        with urllib.request.urlopen(f"{COMFY_URL}/history/{prompt_id}") as response:
+            return json.loads(response.read())
+    except Exception as e:
+        print(f"[ERROR]: Failed to get history for {prompt_id}: {str(e)}")
+        raise
 
 
 def download_image(filename, subfolder, folder_type):
-    """Downloads the generated image to the local OUTPUT_FOLDER."""
+    """Downloads the generated image to the local OUTPUT_FOLDER. Returns local path or None."""
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url_values = urllib.parse.urlencode(data)
 
@@ -294,79 +317,177 @@ def download_image(filename, subfolder, folder_type):
             with open(local_path, "wb") as f:
                 f.write(data)
             print(f"   [SAVED] Image saved to: {local_path}")
+            return local_path
     except Exception as e:
         print(f"   [ERROR] Could not download image: {e}")
+        return None
+
+
+def delete_comfy_input_image(server_filename):
+    """Deletes an uploaded image from ComfyUI's input folder."""
+    if not server_filename:
+        return
+    try:
+        url = f"{COMFY_URL}/api/delete"
+        data = json.dumps(
+            {"delete": [{"filename": server_filename, "type": "input"}]}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}
+        )
+        urllib.request.urlopen(req)
+        print(f"   [CLEANUP] Deleted input image: {server_filename}")
+    except Exception as e:
+        print(f"   [CLEANUP] Could not delete {server_filename}: {e}")
 
 
 def remix(image1, image2, prompt="", workflow=WORKFLOW):
-    server_img1 = upload_image(image1, "Image 1")
-    server_img2 = upload_image(image2, "Image 2")
+    """
+    Run the remix workflow combining two images.
 
-    print("[INFO] Configuring workflow nodes...")
+    Args:
+        image1: Path to first input image
+        image2: Path to second input image
+        prompt: Text prompt for combining (optional)
+        workflow: ComfyUI workflow dict (optional)
 
-    # Node 11: Input Image 1
-    if "11" in workflow:
-        workflow["11"]["inputs"]["image"] = server_img1
-    else:
-        sys.exit("[ERROR]: Node 11 (Load Image) not found.")
+    Returns:
+        dict with prompt_id, status, and output_images on success, None on failure
+    """
+    workflow = workflow.copy()
+    server_img1 = None
+    server_img2 = None
+    output_images = []
 
-    # Node 12: Input Image 2
-    if "12" in workflow:
-        workflow["12"]["inputs"]["image"] = server_img2
-    else:
-        sys.exit("[ERROR]: Node 12 (Load Image) not found.")
+    try:
+        # 1. Upload Input Images
+        server_img1 = upload_image(image1, "Image 1")
+        server_img2 = upload_image(image2, "Image 2")
 
-    # Node 15: Positive Prompt (User input or Default Empty)
-    if "15" in workflow:
-        workflow["15"]["inputs"]["prompt"] = prompt
-        print(f'   Positive Prompt set to: "{prompt}"')
-    else:
-        sys.exit("[ERROR]: Node 15 (Positive Prompt) not found.")
+        if not server_img1 or not server_img2:
+            print("[ERROR]: Upload failed for one or both images. Aborting workflow.")
+            return None
 
-    # Node 13: Negative Prompt (ALWAYS EMPTY)
-    if "13" in workflow:
-        workflow["13"]["inputs"]["prompt"] = ""
-        print("[INFO]:Negative Prompt forced to empty.")
-    else:
-        sys.exit("[ERROR]: Node 13 (Negative Prompt) not found.")
+        print("[INFO] Configuring workflow nodes...")
 
-    # Randomize Seeds to ensure unique results
-    # Node 10 (First KSampler)
-    if "10" in workflow:
-        seed1 = random.randint(1, 10**14)
-        workflow["10"]["inputs"]["seed"] = seed1
-        print(f"   Seed (Node 10) set to: {seed1}")
+        # Node 11: Input Image 1
+        if "11" in workflow:
+            workflow["11"]["inputs"]["image"] = server_img1
+        else:
+            print("[ERROR]: Node 11 (Load Image) not found.")
+            return None
 
-    # Node 33 (Flux KSampler)
-    if "33" in workflow:
-        seed2 = random.randint(1, 10**14)
-        workflow["33"]["inputs"]["seed"] = seed2
-        print(f"   Seed (Node 33) set to: {seed2}")
+        # Node 12: Input Image 2
+        if "12" in workflow:
+            workflow["12"]["inputs"]["image"] = server_img2
+        else:
+            print("[ERROR]: Node 12 (Load Image) not found.")
+            return None
 
-    # 6. Queue Job
-    print("[INFO]: Sending job to ComfyUI...", end="")
-    response = queue_prompt(workflow)
-    prompt_id = response["prompt_id"]
-    print(f" [SUCCESS]:  Job ID: {prompt_id}")
+        # Node 15: Positive Prompt (User input or Default Empty)
+        if "15" in workflow:
+            workflow["15"]["inputs"]["prompt"] = prompt
+            print(f'   Positive Prompt set to: "{prompt}"')
+        else:
+            print("[ERROR]: Node 15 (Positive Prompt) not found.")
+            return None
 
-    # 7. Monitor Loop
-    print("[INFO]: Waiting for generation", end="", flush=True)
-    while True:
-        history = get_history(prompt_id)
-        if prompt_id in history:
-            print("\n[DONE] Generation finished.")
-            outputs = history[prompt_id].get("outputs", {})
+        # Node 13: Negative Prompt (ALWAYS EMPTY)
+        if "13" in workflow:
+            workflow["13"]["inputs"]["prompt"] = ""
+            print("[INFO]: Negative Prompt forced to empty.")
+        else:
+            print("[ERROR]: Node 13 (Negative Prompt) not found.")
+            return None
 
-            found_output = False
-            for node_id, output_data in outputs.items():
-                if "images" in output_data:
-                    for img in output_data["images"]:
-                        found_output = True
-                        print(f"   Server file: {img['filename']}")
-                        download_image(img["filename"], img["subfolder"], img["type"])
+        # Randomize Seeds to ensure unique results
+        # Node 10 (First KSampler)
+        if "10" in workflow:
+            seed1 = random.randint(1, 10**14)
+            workflow["10"]["inputs"]["seed"] = seed1
+            print(f"   Seed (Node 10) set to: {seed1}")
 
-            if not found_output:
-                print("   Warning: Job finished but no output images were found.")
-            break
-        time.sleep(1)
-        print(".", end="", flush=True)
+        # Node 33 (Flux KSampler)
+        if "33" in workflow:
+            seed2 = random.randint(1, 10**14)
+            workflow["33"]["inputs"]["seed"] = seed2
+            print(f"   Seed (Node 33) set to: {seed2}")
+
+        # 2. Queue Job
+        print("[INFO]: Sending job to ComfyUI...", end="")
+        response = queue_prompt(workflow)
+        if not response:
+            print(
+                "\n[ERROR]: Failed to queue prompt; server did not return a valid response."
+            )
+            return None
+
+        prompt_id = response.get("prompt_id")
+        if not prompt_id:
+            print("\n[ERROR]: Server response missing 'prompt_id'. Full response:")
+            print(json.dumps(response, indent=2))
+            return None
+
+        print(f" [SUCCESS]:  Job ID: {prompt_id}")
+
+        # 3. Monitor Loop with timeout
+        print("[INFO]: Waiting for generation", end="", flush=True)
+        start_time = time.time()
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > MAX_POLL_TIME_SECONDS:
+                print(
+                    f"\n[ERROR]: Timeout after {MAX_POLL_TIME_SECONDS}s waiting for generation."
+                )
+                return None
+
+            try:
+                history = get_history(prompt_id)
+                consecutive_errors = 0  # Reset on success
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    print(
+                        f"\n[ERROR]: Aborting after {max_consecutive_errors} consecutive history fetch failures."
+                    )
+                    return None
+                print("x", end="", flush=True)
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            if prompt_id in history:
+                print("\n[DONE] Generation finished.")
+                outputs = history[prompt_id].get("outputs", {})
+
+                for node_id, output_data in outputs.items():
+                    if "images" in output_data:
+                        for img in output_data["images"]:
+                            print(f"   Server file: {img['filename']}")
+                            local_path = download_image(
+                                img["filename"], img["subfolder"], img["type"]
+                            )
+                            if local_path:
+                                output_images.append(local_path)
+
+                if not output_images:
+                    print("   Warning: Job finished but no output images were found.")
+                break
+
+            time.sleep(POLL_INTERVAL_SECONDS)
+            print(".", end="", flush=True)
+
+        return {
+            "prompt_id": prompt_id,
+            "status": "finished",
+            "output_images": output_images,
+        }
+
+    finally:
+        # Cleanup: delete uploaded input images from ComfyUI
+        if server_img1:
+            delete_comfy_input_image(server_img1)
+        if server_img2:
+            delete_comfy_input_image(server_img2)

@@ -1,17 +1,21 @@
 """
-AI Image Processing Server - Flask API with unified model cache (enhanced prompt classifier)
+AI Image Processing Server - Flask API with unified model cache.
 
 All models are loaded once at startup and kept in memory for fast inference.
 
 Usage:
-    python style_transfer_server.py --port 8000
+    python server.py --port 8000
 
 Endpoints:
     POST /style-transfer/text  - Style transfer with text description
     POST /style-transfer/ref   - Style transfer with reference image
     POST /color-grading        - AI color grading
     POST /ai-suggestions       - Get editing suggestions for an image
-    POST /classify             - Classify a prompt into task category (supports image_analysis slots)
+    POST /classify             - Classify a prompt into task category
+    POST /sam/segment          - SAM2 image segmentation
+    POST /comfy/edit           - ComfyUI image editing workflow
+    POST /comfy/remix          - ComfyUI image remix (combine two images)
+    POST /comfy/inpaint        - ComfyUI removal/inpaint with LaMa
     GET  /health               - Check if server is ready
     GET  /status               - Get detailed server status
 """
@@ -34,6 +38,11 @@ from helpers.color_grading import run_color_grading
 from helpers.ai_suggestions import run_ai_suggestions
 
 from helpers.prompt_classifier import run_prompt_classifier, classify_prompt
+
+# ComfyUI workflow helpers
+from helpers.default import main as run_default_edit
+from helpers.remix import remix as run_remix
+from helpers.removal_inpaint import removal_inpaint as run_removal_inpaint
 
 # Segmentation (SAM2)
 from segmentation_sam2.init import segment_image
@@ -361,6 +370,131 @@ def sam_segment():
 
 
 # =============================================================================
+# COMFYUI: DEFAULT IMAGE EDIT ENDPOINT
+# =============================================================================
+@app.route("/comfy/edit", methods=["POST"])
+def comfy_edit():
+    """Edit an image using ComfyUI default workflow.
+
+    Expects JSON: { "image": "path/to/img.jpg", "prompt": "edit instruction" }
+    """
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"error": "Empty request body"}), 400
+
+        for k in ("image", "prompt"):
+            if k not in params:
+                return jsonify({"error": f"Missing: {k}"}), 400
+
+        image_path = params["image"]
+        prompt = params["prompt"]
+
+        if not os.path.exists(image_path):
+            return jsonify({"error": "Image file not found"}), 404
+
+        result = run_default_edit(image_path, prompt)
+
+        if result is None:
+            return jsonify({"error": "Generation failed"}), 500
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR]: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
+# COMFYUI: IMAGE REMIX ENDPOINT
+# =============================================================================
+@app.route("/comfy/remix", methods=["POST"])
+def comfy_remix():
+    """Remix two images using ComfyUI workflow.
+
+    Expects JSON: {
+        "image1": "path/to/img1.jpg",
+        "image2": "path/to/img2.jpg",
+        "prompt": "optional combining instruction"
+    }
+    """
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"error": "Empty request body"}), 400
+
+        for k in ("image1", "image2"):
+            if k not in params:
+                return jsonify({"error": f"Missing: {k}"}), 400
+
+        image1_path = params["image1"]
+        image2_path = params["image2"]
+        prompt = params.get("prompt", "")
+
+        if not os.path.exists(image1_path):
+            return jsonify({"error": "Image1 file not found"}), 404
+
+        if not os.path.exists(image2_path):
+            return jsonify({"error": "Image2 file not found"}), 404
+
+        result = run_remix(image1_path, image2_path, prompt)
+
+        if result is None:
+            return jsonify({"error": "Generation failed"}), 500
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR]: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
+# COMFYUI: REMOVAL/INPAINT ENDPOINT
+# =============================================================================
+@app.route("/comfy/inpaint", methods=["POST"])
+def comfy_inpaint():
+    """Remove objects from image using mask and LaMa inpainting.
+
+    Expects JSON: {
+        "image": "path/to/input.jpg",
+        "mask": "path/to/mask.jpg"
+    }
+    """
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"error": "Empty request body"}), 400
+
+        for k in ("image", "mask"):
+            if k not in params:
+                return jsonify({"error": f"Missing: {k}"}), 400
+
+        image_path = params["image"]
+        mask_path = params["mask"]
+
+        if not os.path.exists(image_path):
+            return jsonify({"error": "Image file not found"}), 404
+
+        if not os.path.exists(mask_path):
+            return jsonify({"error": "Mask file not found"}), 404
+
+        result = run_removal_inpaint(image_path, mask_path)
+
+        if result is None:
+            return jsonify({"error": "Generation failed"}), 500
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR]: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -421,9 +555,11 @@ def main():
     print("  POST /style-transfer/ref   - Style transfer (reference)")
     print("  POST /color-grading        - AI color grading")
     print("  POST /ai-suggestions       - Get editing suggestions")
-    print(
-        "  POST /classify             - Classify prompt (supports image_analysis slots)"
-    )
+    print("  POST /classify             - Classify prompt")
+    print("  POST /sam/segment          - SAM2 segmentation")
+    print("  POST /comfy/edit           - ComfyUI image edit")
+    print("  POST /comfy/remix          - ComfyUI image remix")
+    print("  POST /comfy/inpaint        - ComfyUI removal/inpaint")
     print("  GET  /health               - Health check")
     print("  GET  /status               - Detailed status")
     print("\n[INFO]: Models preloaded - inference will be fast!")
@@ -441,3 +577,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -4,7 +4,6 @@ import urllib.parse
 import urllib.error
 import requests  # pip install requests
 import time
-import sys
 import os
 import random
 
@@ -12,6 +11,10 @@ import random
 OUTPUT_FOLDER = "/workspace/comfy_img_remix/comfycode/outputs"
 
 COMFY_URL = "http://0.0.0.0:8001"
+
+# Polling configuration
+MAX_POLL_TIME_SECONDS = 300  # 5 minutes max wait
+POLL_INTERVAL_SECONDS = 1
 
 WORKFLOW = {
     "1": {
@@ -183,7 +186,7 @@ def get_history(prompt_id):
 
 
 def download_image(filename, subfolder, folder_type):
-    """Downloads the generated image to the local OUTPUT_FOLDER."""
+    """Downloads the generated image to the local OUTPUT_FOLDER. Returns local path or None."""
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url_values = urllib.parse.urlencode(data)
 
@@ -197,106 +200,170 @@ def download_image(filename, subfolder, folder_type):
             with open(local_path, "wb") as f:
                 f.write(data)
             print(f"   [SAVED] Image saved to: {local_path}")
+            return local_path
     except Exception as e:
         print(f"   [ERROR] Could not download image: {e}")
+        return None
+
+
+def delete_comfy_input_image(server_filename):
+    """Deletes an uploaded image from ComfyUI's input folder."""
+    if not server_filename:
+        return
+    try:
+        # ComfyUI stores uploaded images in the input folder
+        # We can delete via the /api/delete endpoint or directly if we have access
+        # Using the view endpoint to check if it exists, then delete via API
+        url = f"{COMFY_URL}/api/delete"
+        data = json.dumps(
+            {"delete": [{"filename": server_filename, "type": "input"}]}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}
+        )
+        urllib.request.urlopen(req)
+        print(f"   [CLEANUP] Deleted input image: {server_filename}")
+    except Exception as e:
+        # Silently ignore cleanup errors - not critical
+        print(f"   [CLEANUP] Could not delete {server_filename}: {e}")
 
 
 def main(image, prompt, workflow=WORKFLOW):
+    """
+    Run the default image editing workflow.
+
+    Args:
+        image: Path to input image
+        prompt: Text prompt for editing
+        workflow: ComfyUI workflow dict (optional)
+
+    Returns:
+        dict with prompt_id, status, and output_images on success, None on failure
+    """
     workflow = workflow.copy()
+    server_img = None
+    output_images = []
 
-    # 2. Upload Input Image
-    server_img = upload_image(image)
-    if not server_img:
-        print(
-            f"[ERROR]: exception : Upload failed for image '{image}'. Aborting job setup."
-        )
-        return None
+    try:
+        # 1. Upload Input Image
+        server_img = upload_image(image)
+        if not server_img:
+            print(f"[ERROR]: Upload failed for image '{image}'. Aborting job setup.")
+            return None
 
-    print("[INFO]:  Configuring workflow nodes...")
+        print("[INFO]:  Configuring workflow nodes...")
 
-    if "15" in workflow:
-        workflow["15"]["inputs"]["image"] = server_img
-    else:
-        print(
-            "[ERROR]: exception : Error: Node 15 (Load Image) not found in workflow JSON."
-        )
-        return None
+        # Node 15: Load Image
+        if "15" in workflow:
+            workflow["15"]["inputs"]["image"] = server_img
+        else:
+            print("[ERROR]: Node 15 (Load Image) not found in workflow JSON.")
+            return None
 
-    # Node 17: Positive Prompt
-    if "17" in workflow:
-        workflow["17"]["inputs"]["prompt"] = prompt
-        print(f'   Prompt set to: "{prompt}"')
-    else:
-        print(
-            "[ERROR]: exception : Error: Node 17 (Text Encode) not found in workflow JSON."
-        )
-        return None
+        # Node 17: Positive Prompt
+        if "17" in workflow:
+            workflow["17"]["inputs"]["prompt"] = prompt
+            print(f'   Prompt set to: "{prompt}"')
+        else:
+            print("[ERROR]: Node 17 (Text Encode) not found in workflow JSON.")
+            return None
 
-    # Node 14: KSampler Seed (Randomize it)
-    if "14" in workflow:
-        new_seed = random.randint(1, 10**14)
-        workflow["14"]["inputs"]["seed"] = new_seed
-        print(f"   Seed set to: {new_seed}")
+        # Node 14: KSampler Seed (Randomize it)
+        if "14" in workflow:
+            new_seed = random.randint(1, 10**14)
+            workflow["14"]["inputs"]["seed"] = new_seed
+            print(f"   Seed set to: {new_seed}")
 
-    # 4. Queue Job
-    print("[INFO]:  Sending job to ComfyUI...", end="")
-    response = queue_prompt(workflow)
-    if not response:
-        print(
-            "\n[ERROR]: exception : Failed to queue prompt; server did not return a valid response."
-        )
-        return None
-
-    prompt_id = response.get("prompt_id")
-    if not prompt_id:
-        print(
-            "\n[ERROR]: exception : Server response missing 'prompt_id'. Full response:"
-        )
-        print(json.dumps(response, indent=2))
-        return None
-
-    print(f" [SUCCESS]:  Job ID: {prompt_id}")
-
-    # 5. Monitor Loop
-    print("[INFO]:  Waiting for generation", end="", flush=True)
-    while True:
-        try:
-            history = get_history(prompt_id)
-        except Exception:
-            # get_history already printed the error; decide whether to continue polling or abort.
-            # Here we abort to avoid spinning forever when server is unreachable.
+        # 2. Queue Job
+        print("[INFO]:  Sending job to ComfyUI...", end="")
+        response = queue_prompt(workflow)
+        if not response:
             print(
-                "\n[ERROR]: exception : Aborting monitoring loop due to get_history failure."
+                "\n[ERROR]: Failed to queue prompt; server did not return a valid response."
             )
             return None
 
-        if prompt_id in history:
-            print("\n[DONE] Generation finished.")
-            outputs = history[prompt_id].get("outputs", {})
+        prompt_id = response.get("prompt_id")
+        if not prompt_id:
+            print("\n[ERROR]: Server response missing 'prompt_id'. Full response:")
+            print(json.dumps(response, indent=2))
+            return None
 
-            found_output = False
-            for node_id, output_data in outputs.items():
-                if "images" in output_data:
-                    for img in output_data["images"]:
-                        found_output = True
-                        print(f"   Server file: {img.get('filename')}")
-                        download_image(
-                            img.get("filename"), img.get("subfolder"), img.get("type")
-                        )
+        print(f" [SUCCESS]:  Job ID: {prompt_id}")
 
-            if not found_output:
-                print("   Warning: Job finished but no output images were found.")
-            break
-        time.sleep(1)
-        print(".", end="", flush=True)
+        # 3. Monitor Loop with timeout
+        print("[INFO]:  Waiting for generation", end="", flush=True)
+        start_time = time.time()
+        consecutive_errors = 0
+        max_consecutive_errors = 5
 
-    return {"prompt_id": prompt_id, "status": "finished"}
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > MAX_POLL_TIME_SECONDS:
+                print(
+                    f"\n[ERROR]: Timeout after {MAX_POLL_TIME_SECONDS}s waiting for generation."
+                )
+                return None
+
+            try:
+                history = get_history(prompt_id)
+                consecutive_errors = 0  # Reset on success
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    print(
+                        f"\n[ERROR]: Aborting after {max_consecutive_errors} consecutive history fetch failures."
+                    )
+                    return None
+                print("x", end="", flush=True)
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            if prompt_id in history:
+                print("\n[DONE] Generation finished.")
+                outputs = history[prompt_id].get("outputs", {})
+
+                for node_id, output_data in outputs.items():
+                    if "images" in output_data:
+                        for img in output_data["images"]:
+                            print(f"   Server file: {img.get('filename')}")
+                            local_path = download_image(
+                                img.get("filename"),
+                                img.get("subfolder"),
+                                img.get("type"),
+                            )
+                            if local_path:
+                                output_images.append(local_path)
+
+                if not output_images:
+                    print("   Warning: Job finished but no output images were found.")
+                break
+
+            time.sleep(POLL_INTERVAL_SECONDS)
+            print(".", end="", flush=True)
+
+        return {
+            "prompt_id": prompt_id,
+            "status": "finished",
+            "output_images": output_images,
+        }
+
+    finally:
+        # Cleanup: delete uploaded input image from ComfyUI
+        if server_img:
+            delete_comfy_input_image(server_img)
 
 
 if __name__ == "__main__":
+    import sys
+
     if len(sys.argv) < 3:
         print("Usage: python script.py <image_path> <prompt>")
     else:
         image_path = sys.argv[1]
         prompt_text = " ".join(sys.argv[2:])
-        main(image_path, prompt_text)
+        result = main(image_path, prompt_text)
+        if result is None:
+            print("[ERROR]: Generation failed")
+        else:
+            print(f"[SUCCESS]: {result}")
