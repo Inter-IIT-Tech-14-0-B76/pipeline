@@ -1,0 +1,21 @@
+{
+  "task": "transfer_with_text",
+  "style_text": "vibrant watercolor painting with soft edges",
+  "prompt": "apply watercolor artistic effect",
+  "negative_prompt": "",
+  "steps": 40,
+  "style_steps": 20,
+  "generated_style_reference": "./outputs/images/transfer_with_text_generated_style_1764846821.png",
+  "style_generation_time": 2.55,
+  "device": "cuda",
+  "images_processed": 1,
+  "images_failed": 0,
+  "results": [
+    {
+      "content_image": "/workspace/AIP/workspace/outputs/images/main.png",
+      "output_composite": "./outputs/images/main_transfer_with_text_1764846821.png",
+      "output_styled_only": "./outputs/images/main_transfer_with_text_styled_1764846821.png",
+      "inference_time": 6.23
+    }
+  ]
+}

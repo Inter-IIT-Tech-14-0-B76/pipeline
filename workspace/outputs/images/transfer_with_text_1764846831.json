@@ -1,0 +1,27 @@
+{
+  "task": "transfer_with_text",
+  "style_text": "oil painting with rich textures and bold strokes",
+  "prompt": "transform into a high quality oil painting style ",
+  "negative_prompt": "",
+  "steps": 40,
+  "style_steps": 20,
+  "generated_style_reference": "./outputs/images/transfer_with_text_generated_style_1764846831.png",
+  "style_generation_time": 2.56,
+  "device": "cuda",
+  "images_processed": 2,
+  "images_failed": 0,
+  "results": [
+    {
+      "content_image": "/workspace/AIP/workspace/outputs/images/main.png",
+      "output_composite": "./outputs/images/main_transfer_with_text_1764846831.png",
+      "output_styled_only": "./outputs/images/main_transfer_with_text_styled_1764846831.png",
+      "inference_time": 6.7
+    },
+    {
+      "content_image": "/workspace/AIP/workspace/outputs/images/reference.png",
+      "output_composite": "./outputs/images/reference_transfer_with_text_1764846831.png",
+      "output_styled_only": "./outputs/images/reference_transfer_with_text_styled_1764846831.png",
+      "inference_time": 6.49
+    }
+  ]
+}
