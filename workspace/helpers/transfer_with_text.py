@@ -1,75 +1,25 @@
-"""Generate a style reference from TEXT using SDXL, then apply it to a content image using ControlNet + IP-Adapter.
-Finally, composite the styled object back onto the original background using rembg.
+"""
+Transfer with Text Helpers - Uses unified model cache
+Generate a style reference from TEXT using SDXL, then apply it to a content image
+using ControlNet + IP-Adapter. Finally, composite the styled object back onto
+the original background using rembg.
 """
 
-import argparse
-import sys
-from pathlib import Path
-import torch
 from PIL import Image, ImageFilter
 import numpy as np
+import cv2
+import json
+import os
+import time
 
-# Try to import rembg
-try:
-    from rembg import remove
-except ImportError:
-    print("❌ Error: 'rembg' library is missing.")
-    print("   Please install it using: pip install rembg")
-    sys.exit(1)
+from .model_cache import get_model_cache
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument(
-        "--content", required=True, nargs="+", help="Path(s) to content image(s)"
-    )
-    p.add_argument(
-        "--style_text",
-        required=True,
-        help="Text description of the style to hallucinate",
-    )
-    p.add_argument("--prompt", required=True, help="Generation prompt for final pass")
-    p.add_argument(
-        "--negative_prompt", default="", help="Negative prompt for final pass"
-    )
-    p.add_argument(
-        "--output_dir", default="output", help="Output directory to save styled images"
-    )
-    p.add_argument(
-        "--sdxl_model",
-        default="stabilityai/stable-diffusion-xl-base-1.0",
-        help="SDXL model id",
-    )
-    p.add_argument(
-        "--controlnet",
-        default="diffusers/controlnet-canny-sdxl-1.0",
-        help="ControlNet model id",
-    )
-    p.add_argument(
-        "--ip_adapter", default="h94/IP-Adapter", help="IP-Adapter repo id (optional)"
-    )
-    p.add_argument(
-        "--device",
-        choices=["cuda", "cpu"],
-        default=None,
-        help="Device to use (auto-detect if omitted)",
-    )
-    p.add_argument(
-        "--steps", type=int, default=50, help="Inference steps for final pass"
-    )
-    p.add_argument(
-        "--style_steps",
-        type=int,
-        default=25,
-        help="Inference steps for style generation from text",
-    )
-    p.add_argument(
-        "--max_side", type=int, default=1024, help="Smart resize max side length"
-    )
-    return p.parse_args()
-
-
-def resize_smart(image, max_side=1024):
+# =============================================================================
+# IMAGE PROCESSING FUNCTIONS
+# =============================================================================
+def resize_smart(image: Image.Image, max_side: int = 1024) -> Image.Image:
+    """Resize image to fit within max_side while maintaining aspect ratio."""
     w, h = image.size
     if w > h:
         new_w = max_side
@@ -82,172 +32,259 @@ def resize_smart(image, max_side=1024):
     return image.resize((new_w, new_h), resample=Image.LANCZOS)
 
 
-def get_canny_image(image):
-    import cv2
-
+def get_canny_image(image: Image.Image) -> Image.Image:
+    """Extract Canny edges from image for ControlNet."""
     arr = np.array(image.convert("RGB"))
-    edges = cv2.Canny(arr, 100, 200)
+
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            gpu_mat = cv2.cuda_GpuMat()
+            gpu_mat.upload(arr)
+            gray_gpu = cv2.cuda.cvtColor(gpu_mat, cv2.COLOR_RGB2GRAY)
+            canny_detector = cv2.cuda.createCannyEdgeDetector(100, 200)
+            edges_gpu = canny_detector.detect(gray_gpu)
+            edges = edges_gpu.download()
+        else:
+            raise RuntimeError("No CUDA devices")
+    except Exception:
+        edges = cv2.Canny(arr, 100, 200)
+
     edges = edges[:, :, None]
     edges = np.concatenate([edges, edges, edges], axis=2)
     return Image.fromarray(edges)
 
 
-def composite_result(original, styled):
+def composite_result(original: Image.Image, styled: Image.Image) -> Image.Image:
     """
-    Applies the user's custom compositing logic using rembg.
+    Composite styled object onto original background using rembg.
     Keeps the original background and only styles the foreground object.
     """
-    print("✂️  Segmenting object from original image (using rembg)...")
+    from rembg import remove
 
-    # 1. Resize Original to Match Styled Output EXACTLY
+    print("[INFO]: Segmenting object from original image...")
+
     target_size = styled.size
     original_resized = original.resize(target_size, Image.LANCZOS)
 
-    # 2. Create Mask from ORIGINAL Image
-    # 'remove' returns the object on a transparent background
-    masked_original = remove(original_resized)
+    # Use cached rembg session
+    session = get_model_cache().get_rembg_session()
+    masked_original = remove(original_resized, session=session)
 
-    # 3. Extract the Alpha channel (The Mask)
-    # White = Object, Black = Background
     mask = masked_original.split()[-1]
-
-    # 4. Refine Mask (Feathering)
-    # Blends edges to avoid the "bad photoshop" look
     mask_blurred = mask.filter(ImageFilter.GaussianBlur(radius=2))
 
-    # 5. Composite
-    # Logic: Paste Styled Image ON TOP of Original Image, using the Mask.
-    print("✨ Merging styled object onto original background...")
+    print("[INFO]: Merging styled object onto original background...")
     final_composite = Image.composite(styled, original_resized, mask_blurred)
 
     return final_composite
 
 
-def generate_style_reference(text_prompt, sdxl_model, steps, device):
-    from diffusers import StableDiffusionXLPipeline
+# =============================================================================
+# INFERENCE FUNCTIONS
+# =============================================================================
+def generate_style_reference(text_prompt: str, steps: int = 25) -> Image.Image:
+    """Generate a style reference image from text using cached SDXL pipeline."""
+    print(f"[INFO]: Generating style reference for: '{text_prompt}'")
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    print(f"🎨 Generating style reference for: '{text_prompt}'")
+    pipe = get_model_cache().get_style_pipeline()
+    img = pipe(prompt=text_prompt, num_inference_steps=steps).images[0]
 
-    # Load separate pipeline for text-to-image
-    temp_pipe = StableDiffusionXLPipeline.from_pretrained(
-        sdxl_model,
-        torch_dtype=dtype,
-        use_safetensors=True,
-    )
-    if device == "cuda":
-        temp_pipe = temp_pipe.to("cuda")
-
-    img = temp_pipe(prompt=text_prompt, num_inference_steps=steps).images[0]
-
-    # Cleanup to save VRAM
-    try:
-        del temp_pipe
-        torch.cuda.empty_cache()
-    except Exception:
-        pass
     return img
 
 
-def main():
-    args = parse_args()
-    # Normalize content path list
-    content_paths = [Path(p) for p in args.content]
+def run_transfer_with_text(
+    content_paths: list,
+    style_text: str,
+    prompt: str,
+    output_dir: str,
+    negative_prompt: str = "",
+    steps: int = 50,
+    style_steps: int = 25,
+    max_side: int = 1024,
+) -> dict:
+    """
+    Run transfer with text on multiple content images.
 
-    # Filter out non-existent inputs early with a warning
-    missing = [str(p) for p in content_paths if not p.exists()]
-    if missing:
-        for m in missing:
-            print(f"Content file not found, skipping: {m}")
-    # Keep only existing ones
-    content_paths = [p for p in content_paths if p.exists()]
-    if len(content_paths) == 0:
-        print("No valid content files provided — exiting.")
-        return
+    This generates a style reference from text ONCE and applies it to all
+    content images, making it efficient for batch processing.
 
-    # Device selection
-    if args.device:
-        device = args.device
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    Args:
+        content_paths: List of paths to content images
+        style_text: Text description of desired style
+        prompt: Generation prompt for final pass
+        output_dir: Directory to save output
+        negative_prompt: Negative prompt for generation
+        steps: Number of inference steps for final pass
+        style_steps: Number of steps for style generation
+        max_side: Maximum side length for resizing
 
-    # Lazy imports for diffusers
-    try:
-        from diffusers.utils import load_image
-    except Exception as e:
-        print("Missing diffusers or related packages.")
-        raise
+    Returns:
+        dict: Contains output paths and metadata for all processed images
+    """
+    timestamp = int(time.time())
+    cache = get_model_cache()
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    print(f"[INFO]: Using device: {cache.device}")
 
-    # Step A: Hallucinate style image from text (do once for all inputs)
-    style_image = generate_style_reference(
-        args.style_text, args.sdxl_model, args.style_steps, device
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Step 1: Generate style reference from text (done ONCE for all images)
+    start_time = time.time()
+    style_image = generate_style_reference(style_text, style_steps)
+    style_gen_time = time.time() - start_time
+    print(f"[INFO]: Style generation took {style_gen_time:.1f}s")
+
+    style_ref_path = os.path.join(
+        output_dir, f"transfer_with_text_generated_style_{timestamp}.png"
     )
-    style_image.save("generated_style_reference.png")
-    print("Saved generated style reference to generated_style_reference.png")
+    style_image.save(style_ref_path)
+    print(f"[SUCCESS]: Saved generated style reference to: {style_ref_path}")
 
-    # Step B: Initialize or retrieve cached pipeline
-    try:
-        pipelines = get_pipelines()
-        print("✅ Using cached pipelines from memory")
-    except RuntimeError:
-        print(
-            "⏳ Loading pipeline components for the first time (this may take a few minutes)..."
-        )
-        pipelines = init_pipelines(
-            sdxl_model=args.sdxl_model,
-            controlnet_model=args.controlnet,
-            ip_adapter=args.ip_adapter,
-            device=device,
-            dtype=dtype,
-        )
-        print("✅ Pipelines loaded and cached in process memory")
+    # Step 2: Get cached ControlNet pipeline
+    pipe = cache.get_controlnet_pipeline()
 
-    # Extract the pipeline object
-    pipe = pipelines["pipe"]
-
-    # Step C: Prepare Content
-    # Ensure output dir exists
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Process each content image
+    # Step 3: Process each content image
+    results = []
     for idx, content_path in enumerate(content_paths, start=1):
-        print(f"\nProcessing ({idx}/{len(content_paths)}): {content_path}")
+        print(f"\n[INFO]: Processing ({idx}/{len(content_paths)}): {content_path}")
 
-        content_raw = (
-            load_image(str(content_path))
-            if "load_image" in globals()
-            else Image.open(content_path).convert("RGB")
-        )
-        content_image = resize_smart(content_raw, max_side=args.max_side)
+        if not os.path.exists(content_path):
+            print(f"[WARN]: Content file not found, skipping: {content_path}")
+            results.append(
+                {
+                    "content_image": content_path,
+                    "error": "File not found",
+                }
+            )
+            continue
+
+        # Load and prepare content image
+        content_raw = Image.open(content_path).convert("RGB")
+        content_image = resize_smart(content_raw, max_side=max_side)
         target_size = content_image.size
 
-        # Resize generated style image to match content aspect ratio for this image
+        # Resize style image to match content
         style_for_image = style_image.resize(target_size, Image.LANCZOS)
         canny_image = get_canny_image(content_image)
 
-        print("🎨 Running final pass with ControlNet and IP-Adapter...")
+        print(f"[INFO]: Running ControlNet + IP-Adapter pass...")
+        start_time = time.time()
         out = pipe(
-            args.prompt,
+            prompt,
             image=canny_image,
             ip_adapter_image=style_for_image,
-            negative_prompt=args.negative_prompt,
-            num_inference_steps=args.steps,
+            negative_prompt=negative_prompt,
+            num_inference_steps=steps,
             controlnet_conditioning_scale=1.0,
         ).images[0]
+        inference_time = time.time() - start_time
+        print(f"[INFO]: ControlNet inference took {inference_time:.1f}s")
 
-        # Background Removal & Composition
+        # Composite result
         final_composite = composite_result(content_raw, out)
 
-        # Save with consistent naming: <original_stem>_styled<ext>
-        suffix = content_path.suffix if content_path.suffix else ".png"
-        out_name = f"{content_path.stem}_styled{suffix}"
-        out_path = out_dir / out_name
-        final_composite.save(out_path)
-        print(f"✅ Done — saved to {out_path}")
+        # Generate unique filename based on original
+        from pathlib import Path
+
+        content_stem = Path(content_path).stem
+        suffix = Path(content_path).suffix if Path(content_path).suffix else ".png"
+
+        output_path = os.path.join(
+            output_dir, f"{content_stem}_transfer_with_text_{timestamp}{suffix}"
+        )
+        final_composite.save(output_path)
+
+        styled_only_path = os.path.join(
+            output_dir, f"{content_stem}_transfer_with_text_styled_{timestamp}{suffix}"
+        )
+        out.save(styled_only_path)
+
+        results.append(
+            {
+                "content_image": content_path,
+                "output_composite": output_path,
+                "output_styled_only": styled_only_path,
+                "inference_time": round(inference_time, 2),
+            }
+        )
+
+        print(f"[SUCCESS]: Saved to: {output_path}")
+
+    # Build final result
+    result = {
+        "task": "transfer_with_text",
+        "style_text": style_text,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "style_steps": style_steps,
+        "generated_style_reference": style_ref_path,
+        "style_generation_time": round(style_gen_time, 2),
+        "device": cache.device,
+        "images_processed": len([r for r in results if "error" not in r]),
+        "images_failed": len([r for r in results if "error" in r]),
+        "results": results,
+    }
+
+    # Save metadata JSON
+    json_output_path = os.path.join(output_dir, f"transfer_with_text_{timestamp}.json")
+    with open(json_output_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+
+    result["metadata_file"] = json_output_path
+
+    print(f"\n[SUCCESS]: Processed {result['images_processed']} images")
+    print(f"[SUCCESS]: Metadata saved to: {json_output_path}")
+
+    return result
 
 
-if __name__ == "__main__":
-    main()
+# =============================================================================
+# SINGLE IMAGE CONVENIENCE FUNCTION
+# =============================================================================
+def run_transfer_with_text_single(
+    content_path: str,
+    style_text: str,
+    prompt: str,
+    output_dir: str,
+    negative_prompt: str = "",
+    steps: int = 50,
+    style_steps: int = 25,
+    max_side: int = 1024,
+) -> dict:
+    """
+    Convenience function for single image transfer with text.
+
+    Args:
+        content_path: Path to content image
+        style_text: Text description of desired style
+        prompt: Generation prompt for final pass
+        output_dir: Directory to save output
+        negative_prompt: Negative prompt for generation
+        steps: Number of inference steps for final pass
+        style_steps: Number of steps for style generation
+        max_side: Maximum side length for resizing
+
+    Returns:
+        dict: Contains output paths and metadata
+    """
+    result = run_transfer_with_text(
+        content_paths=[content_path],
+        style_text=style_text,
+        prompt=prompt,
+        output_dir=output_dir,
+        negative_prompt=negative_prompt,
+        steps=steps,
+        style_steps=style_steps,
+        max_side=max_side,
+    )
+
+    # Flatten result for single image case
+    if result["results"] and "error" not in result["results"][0]:
+        result["output_composite"] = result["results"][0]["output_composite"]
+        result["output_styled_only"] = result["results"][0]["output_styled_only"]
+        result["content_image"] = content_path
+
+    return result
+

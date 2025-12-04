@@ -7,17 +7,19 @@ Usage:
     python server.py --port 8000
 
 Endpoints:
-    POST /style-transfer/text  - Style transfer with text description
-    POST /style-transfer/ref   - Style transfer with reference image
-    POST /color-grading        - AI color grading
-    POST /ai-suggestions       - Get editing suggestions for an image
-    POST /classify             - Classify a prompt into task category
-    POST /sam/segment          - SAM2 image segmentation
-    POST /comfy/edit           - ComfyUI image editing workflow
-    POST /comfy/remix          - ComfyUI image remix (combine two images)
-    POST /comfy/inpaint        - ComfyUI removal/inpaint with LaMa
-    GET  /health               - Check if server is ready
-    GET  /status               - Get detailed server status
+    POST /style-transfer/text    - Style transfer with text description
+    POST /style-transfer/ref     - Style transfer with reference image
+    POST /transfer-with-text     - Transfer with text (batch support)
+    POST /transfer-with-text/single - Transfer with text (single image)
+    POST /color-grading          - AI color grading
+    POST /ai-suggestions         - Get editing suggestions for an image
+    POST /classify               - Classify a prompt into task category
+    POST /sam/segment            - SAM2 image segmentation
+    POST /comfy/edit             - ComfyUI image editing workflow
+    POST /comfy/remix            - ComfyUI image remix (combine two images)
+    POST /comfy/inpaint          - ComfyUI removal/inpaint with LaMa
+    GET  /health                 - Check if server is ready
+    GET  /status                 - Get detailed server status
 """
 
 import os
@@ -36,6 +38,10 @@ from helpers.style_transfer_text import run_style_transfer
 from helpers.style_transfer_ref import run_style_transfer_ref
 from helpers.color_grading import run_color_grading
 from helpers.ai_suggestions import run_ai_suggestions
+from helpers.transfer_with_text import (
+    run_transfer_with_text,
+    run_transfer_with_text_single,
+)
 
 from helpers.prompt_classifier import run_prompt_classifier, classify_prompt
 
@@ -195,6 +201,104 @@ def style_transfer_ref():
             output_dir=params.get("output_dir", DEFAULT_OUTPUT_IMAGES),
             negative_prompt=params.get("negative_prompt", neg_prompt),
             steps=params.get("steps", 50),
+            max_side=params.get("max_side", 1024),
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR]: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
+# TRANSFER WITH TEXT ENDPOINT (BATCH)
+# =============================================================================
+@app.route("/transfer-with-text", methods=["POST"])
+def transfer_with_text():
+    """Transfer style using text description, supports batch processing.
+
+    Generates a style reference from text ONCE and applies it to all content images.
+    Efficient for processing multiple images with the same style.
+    """
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"error": "Empty request body"}), 400
+
+        required = ["style_text", "prompt"]
+        missing = [p for p in required if p not in params]
+        if missing:
+            return jsonify({"error": f"Missing: {missing}"}), 400
+
+        # Support both single content (string) and batch content (list)
+        content_param = params.get("content") or params.get("contents")
+        if not content_param:
+            return jsonify({"error": "Missing: content or contents"}), 400
+
+        # Normalize to list
+        if isinstance(content_param, str):
+            content_paths = [content_param]
+        else:
+            content_paths = list(content_param)
+
+        # Validate files exist
+        missing_files = [p for p in content_paths if not os.path.exists(p)]
+        if missing_files:
+            return jsonify(
+                {"error": "Content file(s) not found", "missing_files": missing_files}
+            ), 404
+
+        result = run_transfer_with_text(
+            content_paths=content_paths,
+            style_text=params["style_text"],
+            prompt=params["prompt"],
+            output_dir=params.get("output_dir", DEFAULT_OUTPUT_IMAGES),
+            negative_prompt=params.get("negative_prompt", ""),
+            steps=params.get("steps", 50),
+            style_steps=params.get("style_steps", 25),
+            max_side=params.get("max_side", 1024),
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR]: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================================================================
+# TRANSFER WITH TEXT SINGLE ENDPOINT
+# =============================================================================
+@app.route("/transfer-with-text/single", methods=["POST"])
+def transfer_with_text_single():
+    """Transfer style using text description for a single image.
+
+    Convenience endpoint that returns flattened output paths.
+    """
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"error": "Empty request body"}), 400
+
+        required = ["content", "style_text", "prompt"]
+        missing = [p for p in required if p not in params]
+        if missing:
+            return jsonify({"error": f"Missing: {missing}"}), 400
+
+        if not os.path.exists(params["content"]):
+            return jsonify({"error": "Content file not found"}), 404
+
+        result = run_transfer_with_text_single(
+            content_path=params["content"],
+            style_text=params["style_text"],
+            prompt=params["prompt"],
+            output_dir=params.get("output_dir", DEFAULT_OUTPUT_IMAGES),
+            negative_prompt=params.get("negative_prompt", ""),
+            steps=params.get("steps", 50),
+            style_steps=params.get("style_steps", 25),
             max_side=params.get("max_side", 1024),
         )
 
@@ -551,17 +655,19 @@ def main():
     print(f"SERVER RUNNING ON http://{args.host}:{args.port}")
     print("=" * 60)
     print("\nEndpoints:")
-    print("  POST /style-transfer/text  - Style transfer (text)")
-    print("  POST /style-transfer/ref   - Style transfer (reference)")
-    print("  POST /color-grading        - AI color grading")
-    print("  POST /ai-suggestions       - Get editing suggestions")
-    print("  POST /classify             - Classify prompt")
-    print("  POST /sam/segment          - SAM2 segmentation")
-    print("  POST /comfy/edit           - ComfyUI image edit")
-    print("  POST /comfy/remix          - ComfyUI image remix")
-    print("  POST /comfy/inpaint        - ComfyUI removal/inpaint")
-    print("  GET  /health               - Health check")
-    print("  GET  /status               - Detailed status")
+    print("  POST /style-transfer/text    - Style transfer (text)")
+    print("  POST /style-transfer/ref     - Style transfer (reference)")
+    print("  POST /transfer-with-text     - Transfer with text (batch)")
+    print("  POST /transfer-with-text/single - Transfer with text (single)")
+    print("  POST /color-grading          - AI color grading")
+    print("  POST /ai-suggestions         - Get editing suggestions")
+    print("  POST /classify               - Classify prompt")
+    print("  POST /sam/segment            - SAM2 segmentation")
+    print("  POST /comfy/edit             - ComfyUI image edit")
+    print("  POST /comfy/remix            - ComfyUI image remix")
+    print("  POST /comfy/inpaint          - ComfyUI removal/inpaint")
+    print("  GET  /health                 - Health check")
+    print("  GET  /status                 - Detailed status")
     print("\n[INFO]: Models preloaded - inference will be fast!")
     print("[INFO]: Press Ctrl+C to stop\n")
 
@@ -577,4 +683,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

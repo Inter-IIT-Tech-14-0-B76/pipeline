@@ -151,6 +151,40 @@ def sam_segment():
     pretty(r)
 
 
+def transfer_with_text_single():
+    """Test the single image transfer with text endpoint."""
+    print("\n--- /transfer-with-text/single ---")
+    r = requests.post(
+        f"{BASE}/transfer-with-text/single",
+        json={
+            "content": CONTENT,
+            "style_text": "vibrant watercolor painting with soft edges",
+            "prompt": "apply watercolor artistic effect",
+            "steps": 40,
+            "style_steps": 20,
+        },
+        timeout=300,
+    )
+    pretty(r)
+
+
+def transfer_with_text_batch():
+    """Test the batch transfer with text endpoint."""
+    print("\n--- /transfer-with-text (batch) ---")
+    r = requests.post(
+        f"{BASE}/transfer-with-text",
+        json={
+            "contents": [CONTENT, STYLE],  # Process multiple images
+            "style_text": "oil painting with rich textures and bold strokes",
+            "prompt": "transform into a high quality oil painting style ",
+            "steps": 40,
+            "style_steps": 20,
+        },
+        timeout=600,
+    )
+    pretty(r)
+
+
 # ---------------------------
 # MAIN
 # ---------------------------
@@ -171,8 +205,12 @@ if __name__ == "__main__":
 
     timed("sam_segment", sam_segment)
 
+    # Transfer with text endpoints
+    timed("transfer_with_text_single", transfer_with_text_single)
+    timed("transfer_with_text_batch", transfer_with_text_batch)
+
     print("\n==================== TIMING SUMMARY ====================")
     for k, v in timings.items():
-        print(f"{k:25s}: {v:6.3f} sec")
+        print(f"{k:30s}: {v:6.3f} sec")
     print("========================================================")
 
